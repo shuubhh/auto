@@ -43,6 +43,16 @@ type EventGridValidationResponse struct {
 	ValidationResponse string `json:"validationResponse"`
 }
 
+// ReadSeekCloser wraps a bytes.Reader to implement io.ReadSeekCloser
+type ReadSeekCloser struct {
+	*bytes.Reader
+}
+
+// Close implements the Closer interface (no-op for bytes.Reader)
+func (r ReadSeekCloser) Close() error {
+	return nil
+}
+
 func main() {
 	http.HandleFunc("/process", handleProcess)
 	// Add health check endpoint
@@ -383,9 +393,9 @@ func uploadToOutputContainer(ctx context.Context, cred *azidentity.ManagedIdenti
 	// For simplicity, we'll just add "_processed" suffix
 	newFilename := strings.TrimSuffix(originalFilename, ".xlsx") + "_processed.xlsx"
 
-	// Convert bytes.Buffer to bytes.Reader which implements io.ReadSeeker
+	// Convert bytes.Buffer to ReadSeekCloser which implements io.ReadSeekCloser
 	excelData := excelBuffer.Bytes()
-	reader := bytes.NewReader(excelData)
+	reader := ReadSeekCloser{bytes.NewReader(excelData)}
 
 	// Upload to output container
 	blobClient := containerClient.NewBlockBlobClient(newFilename)
