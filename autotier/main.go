@@ -16,7 +16,6 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blockblob"
-	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/service"
 	"github.com/xuri/excelize/v2"
 )
@@ -384,11 +383,17 @@ func uploadToOutputContainer(ctx context.Context, cred *azidentity.ManagedIdenti
 	// For simplicity, we'll just add "_processed" suffix
 	newFilename := strings.TrimSuffix(originalFilename, ".xlsx") + "_processed.xlsx"
 
+	// Convert bytes.Buffer to bytes.Reader which implements io.ReadSeeker
+	excelData := excelBuffer.Bytes()
+	reader := bytes.NewReader(excelData)
+
 	// Upload to output container
 	blobClient := containerClient.NewBlockBlobClient(newFilename)
-	_, err = blobClient.Upload(ctx, excelBuffer, &blockblob.UploadOptions{
+	contentType := http.DetectContentType(excelData)
+	
+	_, err = blobClient.Upload(ctx, reader, &blockblob.UploadOptions{
 		HTTPHeaders: &blob.HTTPHeaders{
-			BlobContentType: http.DetectContentType(excelBuffer.Bytes()),
+			BlobContentType: &contentType,
 		},
 	})
 	if err != nil {
