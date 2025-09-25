@@ -16,6 +16,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blockblob"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/service"
 	"github.com/xuri/excelize/v2"
 )
@@ -45,7 +46,6 @@ type EventGridValidationResponse struct {
 
 func main() {
 	http.HandleFunc("/process", handleProcess)
-
 	// Add health check endpoint
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -83,11 +83,9 @@ func handleProcess(w http.ResponseWriter, r *http.Request) {
 	if err := json.Unmarshal(body, &validationReq); err == nil && len(validationReq) > 0 {
 		if validationReq[0].EventType == "Microsoft.EventGrid.SubscriptionValidationEvent" {
 			log.Printf("Handling validation request: %s", validationReq[0].Data.ValidationCode)
-
 			response := EventGridValidationResponse{
 				ValidationResponse: validationReq[0].Data.ValidationCode,
 			}
-
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode(response)
@@ -131,7 +129,7 @@ func handleProcess(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, "✅ Event processed")
 }
 
-// processExcelBlob downloads the blob and applies the tier-change logic
+// processExcelBlob downloads the blob, processes it, and uploads to output container
 func processExcelBlob(blobURL string) error {
 	ctx := context.Background()
 	cred, err := azidentity.NewManagedIdentityCredential(nil)
@@ -164,81 +162,255 @@ func processExcelBlob(blobURL string) error {
 	}
 	defer f.Close()
 
-	// Regex to match blob URLs in Excel cells
-	regex := regexp.MustCompile(`https://([^.]+)\.blob\.core\.windows\.net/([^/]+)/(.+)`)
-	rows, err := f.GetRows("Sheet1")
-	if err != nil {
-		return fmt.Errorf("failed to get rows: %w", err)
+	// Get output container name from environment variable
+	outputContainer := os.Getenv("OUTPUT_STORAGE_CONTAINER")
+	if outputContainer == "" {
+		return fmt.Errorf("OUTPUT_STORAGE_CONTAINER environment variable not set")
 	}
 
-	var processed, changed, skipped, errors int
-	for _, row := range rows {
-		for _, cell := range row {
-			m := regex.FindStringSubmatch(cell)
-			if m == nil {
-				continue
-			}
-			processed++
-			account := m[1]
-			containerName := m[2]
-			blobPath := m[3]
+	// Get storage account name from the input blob URL
+	storageAccount, err := extractStorageAccountFromURL(blobURL)
+	if err != nil {
+		return fmt.Errorf("failed to extract storage account from URL: %w", err)
+	}
 
-			log.Printf("Processing blob: account=%s, container=%s, path=%s", account, containerName, blobPath)
+	// Process the Excel file
+	statusUpdates, err := processExcelFile(f)
+	if err != nil {
+		return fmt.Errorf("failed to process excel file: %w", err)
+	}
 
-			// Properly URL encode the blob path
-			pathSegments := strings.Split(blobPath, "/")
-			for i, segment := range pathSegments {
-				pathSegments[i] = url.PathEscape(segment)
-			}
-			encodedBlobPath := strings.Join(pathSegments, "/")
+	// Save the modified Excel file to memory
+	var excelBuffer bytes.Buffer
+	if err := f.Write(&excelBuffer); err != nil {
+		return fmt.Errorf("failed to write excel to buffer: %w", err)
+	}
 
-			serviceURL := fmt.Sprintf("https://%s.blob.core.windows.net/", account)
-			serviceClient, err := service.NewClient(serviceURL, cred, nil)
-			if err != nil {
-				log.Printf("error creating service client: %v", err)
-				errors++
-				continue
-			}
+	// Upload processed file to output container
+	if err := uploadToOutputContainer(ctx, cred, storageAccount, outputContainer, blobURL, &excelBuffer); err != nil {
+		return fmt.Errorf("failed to upload to output container: %w", err)
+	}
 
-			containerClient := serviceClient.NewContainerClient(containerName)
-			blobClient := containerClient.NewBlobClient(encodedBlobPath)
+	log.Printf("✅ Processing completed. Status updates: %+v", statusUpdates)
+	return nil
+}
 
-			props, err := blobClient.GetProperties(ctx, nil)
-			if err != nil {
-				log.Printf("blob does not exist or cannot access: %v", err)
-				errors++
-				continue
-			}
+// extractStorageAccountFromURL extracts storage account name from blob URL
+func extractStorageAccountFromURL(blobURL string) (string, error) {
+	// Regex to match blob URLs
+	regex := regexp.MustCompile(`https://([^.]+)\.blob\.core\.windows\.net/`)
+	matches := regex.FindStringSubmatch(blobURL)
+	if len(matches) < 2 {
+		return "", fmt.Errorf("invalid blob URL format: %s", blobURL)
+	}
+	return matches[1], nil
+}
 
-			if props.AccessTier == nil {
-				log.Printf("AccessTier not set for blob: %s", blobClient.URL())
-				skipped++
-				continue
-			}
+// processExcelFile processes the Excel file and adds status column
+func processExcelFile(f *excelize.File) (map[string]int, error) {
+	stats := map[string]int{
+		"processed": 0,
+		"changed":   0,
+		"skipped":   0,
+		"errors":    0,
+	}
 
-			currentTier := blob.AccessTier(*props.AccessTier)
-			if currentTier == blob.AccessTierArchive {
-				blockClient, err := blockblob.NewClient(blobClient.URL(), cred, nil)
-				if err != nil {
-					log.Printf("failed to create block blob client: %v", err)
-					errors++
-					continue
-				}
-				_, err = blockClient.SetTier(ctx, blob.AccessTierCool, nil)
-				if err != nil {
-					log.Printf("failed to set tier: %v", err)
-					errors++
-				} else {
-					log.Printf("Tier changed from Archive to Cool ✅")
-					changed++
-				}
-			} else {
-				log.Printf("No change needed (current: %s)", string(currentTier))
-				skipped++
-			}
+	// Regex to match blob URLs in Excel cells
+	regex := regexp.MustCompile(`https://([^.]+)\.blob\.core\.windows\.net/([^/]+)/(.+)`)
+
+	// Get all rows from Sheet1
+	rows, err := f.GetRows("Sheet1")
+	if err != nil {
+		return stats, fmt.Errorf("failed to get rows: %w", err)
+	}
+
+	if len(rows) == 0 {
+		return stats, nil
+	}
+
+	// Find the URL column index and add Status column
+	urlColIndex := -1
+	headers := rows[0]
+	for i, header := range headers {
+		if strings.EqualFold(strings.TrimSpace(header), "url") {
+			urlColIndex = i
+			break
 		}
 	}
 
-	log.Printf("Done. Processed=%d, Changed=%d, Skipped=%d, Errors=%d", processed, changed, skipped, errors)
+	// If URL column not found, use first column as reference
+	if urlColIndex == -1 {
+		urlColIndex = 0
+	}
+
+	// Status column will be added after URL column
+	statusColIndex := urlColIndex + 1
+
+	// Add "Status" header to the first row
+	statusCell, _ := excelize.CoordinatesToCellName(statusColIndex+1, 1) // +1 because excelize is 1-based
+	if err := f.SetCellValue("Sheet1", statusCell, "Status"); err != nil {
+		return stats, fmt.Errorf("failed to set status header: %w", err)
+	}
+
+	// Process each row starting from row 2 (skip header)
+	for rowIndex := 1; rowIndex < len(rows); rowIndex++ {
+		if urlColIndex >= len(rows[rowIndex]) {
+			continue // Skip rows that don't have URL column
+		}
+
+		cellValue := rows[rowIndex][urlColIndex]
+		m := regex.FindStringSubmatch(cellValue)
+		if m == nil {
+			continue // Skip if not a blob URL
+		}
+
+		stats["processed"]++
+
+		account := m[1]
+		containerName := m[2]
+		blobPath := m[3]
+
+		log.Printf("Processing blob: account=%s, container=%s, path=%s", account, containerName, blobPath)
+
+		// Process the blob and get status
+		status, err := processBlobTier(account, containerName, blobPath)
+		if err != nil {
+			stats["errors"]++
+			status = fmt.Sprintf("Error: %v", err)
+		} else {
+			if status == "Changed: Archive → Cool" {
+				stats["changed"]++
+			} else {
+				stats["skipped"]++
+			}
+		}
+
+		// Write status to the Status column
+		statusCell, err := excelize.CoordinatesToCellName(statusColIndex+1, rowIndex+1) // +1 because excelize is 1-based
+		if err != nil {
+			stats["errors"]++
+			log.Printf("Failed to get status cell coordinates: %v", err)
+			continue
+		}
+
+		if err := f.SetCellValue("Sheet1", statusCell, status); err != nil {
+			stats["errors"]++
+			log.Printf("Failed to set status cell value: %v", err)
+			continue
+		}
+	}
+
+	return stats, nil
+}
+
+// processBlobTier checks and updates blob tier if necessary
+func processBlobTier(account, containerName, blobPath string) (string, error) {
+	ctx := context.Background()
+	cred, err := azidentity.NewManagedIdentityCredential(nil)
+	if err != nil {
+		return "Error: Failed to get credential", err
+	}
+
+	// Properly URL encode the blob path
+	pathSegments := strings.Split(blobPath, "/")
+	for i, segment := range pathSegments {
+		pathSegments[i] = url.PathEscape(segment)
+	}
+	encodedBlobPath := strings.Join(pathSegments, "/")
+
+	serviceURL := fmt.Sprintf("https://%s.blob.core.windows.net/", account)
+	serviceClient, err := service.NewClient(serviceURL, cred, nil)
+	if err != nil {
+		return "Error: Failed to create service client", err
+	}
+
+	containerClient := serviceClient.NewContainerClient(containerName)
+	blobClient := containerClient.NewBlobClient(encodedBlobPath)
+
+	props, err := blobClient.GetProperties(ctx, nil)
+	if err != nil {
+		return "Error: Blob not accessible", err
+	}
+
+	if props.AccessTier == nil {
+		return "Skipped: No access tier set", nil
+	}
+
+	currentTier := blob.AccessTier(*props.AccessTier)
+	if currentTier == blob.AccessTierArchive {
+		blockClient, err := blockblob.NewClient(blobClient.URL(), cred, nil)
+		if err != nil {
+			return "Error: Failed to create block client", err
+		}
+
+		_, err = blockClient.SetTier(ctx, blob.AccessTierCool, nil)
+		if err != nil {
+			return "Error: Failed to set tier", err
+		}
+
+		return "Changed: Archive → Cool", nil
+	}
+
+	return fmt.Sprintf("Skipped: Already %s", string(currentTier)), nil
+}
+
+// uploadToOutputContainer uploads the processed file to the output container
+func uploadToOutputContainer(ctx context.Context, cred *azidentity.ManagedIdentityCredential, storageAccount, outputContainer, originalBlobURL string, excelBuffer *bytes.Buffer) error {
+	serviceURL := fmt.Sprintf("https://%s.blob.core.windows.net/", storageAccount)
+	serviceClient, err := service.NewClient(serviceURL, cred, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create service client: %w", err)
+	}
+
+	// Ensure output container exists
+	containerClient := serviceClient.NewContainerClient(outputContainer)
+	_, err = containerClient.GetProperties(ctx, nil)
+	if err != nil {
+		// Container doesn't exist, try to create it
+		_, err = containerClient.Create(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("failed to create output container: %w", err)
+		}
+		log.Printf("Created output container: %s", outputContainer)
+	}
+
+	// Extract original filename from blob URL
+	originalFilename, err := extractFilenameFromURL(originalBlobURL)
+	if err != nil {
+		return fmt.Errorf("failed to extract filename from URL: %w", err)
+	}
+
+	// Create new filename with timestamp or processed marker
+	// For simplicity, we'll just add "_processed" suffix
+	newFilename := strings.TrimSuffix(originalFilename, ".xlsx") + "_processed.xlsx"
+
+	// Upload to output container
+	blobClient := containerClient.NewBlockBlobClient(newFilename)
+	_, err = blobClient.Upload(ctx, excelBuffer, &blockblob.UploadOptions{
+		HTTPHeaders: &blob.HTTPHeaders{
+			BlobContentType: http.DetectContentType(excelBuffer.Bytes()),
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to upload processed file: %w", err)
+	}
+
+	log.Printf("✅ Processed file uploaded to: %s/%s", outputContainer, newFilename)
 	return nil
+}
+
+// extractFilenameFromURL extracts filename from blob URL
+func extractFilenameFromURL(blobURL string) (string, error) {
+	parsedURL, err := url.Parse(blobURL)
+	if err != nil {
+		return "", err
+	}
+
+	// Extract the last part of the path as filename
+	pathParts := strings.Split(parsedURL.Path, "/")
+	if len(pathParts) == 0 {
+		return "", fmt.Errorf("invalid URL path: %s", parsedURL.Path)
+	}
+
+	return pathParts[len(pathParts)-1], nil
 }
