@@ -3,16 +3,13 @@ package main
 import (
 	"context"
 	"fmt"
-
-	//      "io"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
-	//      "github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blockblob"
-	//      "github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/service"
 )
 
@@ -55,6 +52,16 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
+	// Check file extension - only allow .xlsx files
+	fileName := header.Filename
+	fileExt := strings.ToLower(filepath.Ext(fileName))
+
+	if fileExt != ".xlsx" {
+		log.Printf("Invalid file type attempted: %s", fileName)
+		http.Error(w, "❌ Only .xlsx files are allowed. Please upload an Excel file with .xlsx extension.", http.StatusBadRequest)
+		return
+	}
+
 	storageAccount := os.Getenv("STORAGE_ACCOUNT")
 	containerName := os.Getenv("STORAGE_CONTAINER")
 	if storageAccount == "" || containerName == "" {
@@ -79,7 +86,7 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	containerClient := serviceClient.NewContainerClient(containerName)
-	blobName := filepath.Base(header.Filename)
+	blobName := filepath.Base(fileName)
 	blobClient := containerClient.NewBlockBlobClient(blobName)
 
 	ctx := context.Background()
