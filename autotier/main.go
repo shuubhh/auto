@@ -203,17 +203,6 @@ func processExcelBlob(blobURL string) error {
 	return nil
 }
 
-// extractStorageAccountFromURL extracts storage account name from blob URL
-func extractStorageAccountFromURL(blobURL string) (string, error) {
-	// Regex to match blob URLs
-	regex := regexp.MustCompile(`https://([^.]+)\.blob\.core\.windows\.net/`)
-	matches := regex.FindStringSubmatch(blobURL)
-	if len(matches) < 2 {
-		return "", fmt.Errorf("invalid blob URL format: %s", blobURL)
-	}
-	return matches[1], nil
-}
-
 // processExcelFile processes the Excel file and adds status column
 func processExcelFile(f *excelize.File) (map[string]int, error) {
 	stats := map[string]int{
@@ -223,53 +212,78 @@ func processExcelFile(f *excelize.File) (map[string]int, error) {
 		"errors":    0,
 	}
 
-	// Regex to match blob URLs in Excel cells
-	regex := regexp.MustCompile(`https://([^.]+)\.blob\.core\.windows\.net/([^/]+)/(.+)`)
+	// More flexible regex to match Azure blob URLs
+	regex := regexp.MustCompile(`https://([a-zA-Z0-9-]+)\.blob\.core\.windows\.net/([^/\s]+)/([^\s"]+)`)
 
-	// Get all rows from Sheet1
-	rows, err := f.GetRows("Sheet1")
+	// Get all sheet names
+	sheetList := f.GetSheetList()
+	if len(sheetList) == 0 {
+		return stats, fmt.Errorf("no sheets found in Excel file")
+	}
+
+	// Use the first sheet (dynamic sheet name)
+	sheetName := sheetList[0]
+	log.Printf("Processing sheet: %s", sheetName)
+
+	// Get all rows from the sheet
+	rows, err := f.GetRows(sheetName)
 	if err != nil {
-		return stats, fmt.Errorf("failed to get rows: %w", err)
+		return stats, fmt.Errorf("failed to get rows from sheet %s: %w", sheetName, err)
 	}
 
 	if len(rows) == 0 {
+		log.Printf("No rows found in sheet: %s", sheetName)
 		return stats, nil
 	}
 
-	// Find the URL column index and add Status column
-	urlColIndex := -1
-	headers := rows[0]
-	for i, header := range headers {
-		if strings.EqualFold(strings.TrimSpace(header), "url") {
-			urlColIndex = i
-			break
-		}
-	}
+	log.Printf("Found %d rows in sheet: %s", len(rows), sheetName)
 
-	// If URL column not found, use first column as reference
+	// Find the column that contains blob URLs by checking header names and content
+	urlColIndex := findURLColumn(rows, regex)
 	if urlColIndex == -1 {
-		urlColIndex = 0
+		log.Printf("No URL column found in sheet: %s", sheetName)
+		return stats, nil
 	}
 
-	// Status column will be added after URL column
-	statusColIndex := urlColIndex + 1
+	log.Printf("Found URL column at index: %d (header: '%s')", urlColIndex, rows[0][urlColIndex])
+
+	// Status column will be added after the last column
+	statusColIndex := len(rows[0])
 
 	// Add "Status" header to the first row
-	statusCell, _ := excelize.CoordinatesToCellName(statusColIndex+1, 1) // +1 because excelize is 1-based
-	if err := f.SetCellValue("Sheet1", statusCell, "Status"); err != nil {
+	statusCell, err := excelize.CoordinatesToCellName(statusColIndex+1, 1)
+	if err != nil {
+		return stats, fmt.Errorf("failed to get status cell coordinates: %w", err)
+	}
+
+	if err := f.SetCellValue(sheetName, statusCell, "Status"); err != nil {
 		return stats, fmt.Errorf("failed to set status header: %w", err)
 	}
 
 	// Process each row starting from row 2 (skip header)
 	for rowIndex := 1; rowIndex < len(rows); rowIndex++ {
-		if urlColIndex >= len(rows[rowIndex]) {
-			continue // Skip rows that don't have URL column
+		row := rows[rowIndex]
+		if len(row) == 0 {
+			continue // Skip empty rows
 		}
 
-		cellValue := rows[rowIndex][urlColIndex]
-		m := regex.FindStringSubmatch(cellValue)
+		// Ensure the row has enough columns
+		if urlColIndex >= len(row) {
+			log.Printf("Row %d: URL column index out of bounds (row has %d columns, need %d)", 
+				rowIndex+1, len(row), urlColIndex+1)
+			continue
+		}
+
+		urlValue := strings.TrimSpace(row[urlColIndex])
+		if urlValue == "" {
+			log.Printf("Row %d: Empty URL value", rowIndex+1)
+			continue
+		}
+
+		m := regex.FindStringSubmatch(urlValue)
 		if m == nil {
-			continue // Skip if not a blob URL
+			log.Printf("Row %d: URL doesn't match expected format: %s", rowIndex+1, urlValue)
+			continue
 		}
 
 		stats["processed"]++
@@ -277,37 +291,104 @@ func processExcelFile(f *excelize.File) (map[string]int, error) {
 		containerName := m[2]
 		blobPath := m[3]
 
-		log.Printf("Processing blob: account=%s, container=%s, path=%s", account, containerName, blobPath)
+		log.Printf("Row %d: Processing blob - account=%s, container=%s, path=%s", 
+			rowIndex+1, account, containerName, blobPath)
 
 		// Process the blob and get status
 		status, err := processBlobTier(account, containerName, blobPath)
 		if err != nil {
 			stats["errors"]++
 			status = fmt.Sprintf("Error: %v", err)
+			log.Printf("Row %d: Error processing blob: %v", rowIndex+1, err)
 		} else {
-			if status == "Changed: Archive → Cool" {
+			if strings.Contains(status, "Changed: Archive → Cool") {
 				stats["changed"]++
 			} else {
 				stats["skipped"]++
 			}
+			log.Printf("Row %d: %s", rowIndex+1, status)
 		}
 
 		// Write status to the Status column
-		statusCell, err := excelize.CoordinatesToCellName(statusColIndex+1, rowIndex+1) // +1 because excelize is 1-based
+		statusCell, err := excelize.CoordinatesToCellName(statusColIndex+1, rowIndex+1)
 		if err != nil {
 			stats["errors"]++
-			log.Printf("Failed to get status cell coordinates: %v", err)
+			log.Printf("Row %d: Failed to get status cell coordinates: %v", rowIndex+1, err)
 			continue
 		}
 
-		if err := f.SetCellValue("Sheet1", statusCell, status); err != nil {
+		if err := f.SetCellValue(sheetName, statusCell, status); err != nil {
 			stats["errors"]++
-			log.Printf("Failed to set status cell value: %v", err)
+			log.Printf("Row %d: Failed to set status cell value: %v", rowIndex+1, err)
 			continue
 		}
 	}
 
+	log.Printf("Processing completed for sheet '%s'. Stats: %+v", sheetName, stats)
 	return stats, nil
+}
+
+// findURLColumn searches for the column that contains Azure blob URLs
+func findURLColumn(rows [][]string, regex *regexp.Regexp) int {
+	if len(rows) == 0 {
+		return -1
+	}
+
+	headers := rows[0]
+	
+	// Common column names that might contain blob URLs
+	commonURLHeaders := []string{
+		"azure_blob_location", "blob_location", "azure_blob", "blob_url", 
+		"url", "blob", "location", "file_path", "file_url", "storage_url",
+		"azure_storage_url", "blob_path",
+	}
+
+	// First, try to find by header name (case insensitive)
+	for colIndex, header := range headers {
+		cleanHeader := strings.ToLower(strings.TrimSpace(header))
+		for _, commonHeader := range commonURLHeaders {
+			if cleanHeader == commonHeader {
+				log.Printf("Found URL column by header name: '%s' at index %d", header, colIndex)
+				return colIndex
+			}
+		}
+	}
+
+	// If not found by header name, search for columns that contain blob URLs in the data rows
+	log.Printf("URL column not found by header name, searching data rows for blob URLs")
+	
+	// Count URL matches per column
+	urlMatches := make([]int, len(headers))
+	
+	for rowIndex := 1; rowIndex < len(rows) && rowIndex < 10; rowIndex++ { // Check first 10 data rows
+		row := rows[rowIndex]
+		for colIndex, cellValue := range row {
+			if colIndex >= len(urlMatches) {
+				continue
+			}
+			if regex.MatchString(strings.TrimSpace(cellValue)) {
+				urlMatches[colIndex]++
+			}
+		}
+	}
+	
+	// Find column with most URL matches
+	maxMatches := 0
+	bestColumn := -1
+	for colIndex, matches := range urlMatches {
+		if matches > maxMatches {
+			maxMatches = matches
+			bestColumn = colIndex
+		}
+	}
+	
+	if bestColumn != -1 {
+		log.Printf("Found URL column by content analysis: column %d has %d URL matches", bestColumn, maxMatches)
+		return bestColumn
+	}
+
+	log.Printf("No URL column found after content analysis")
+	return -1
 }
 
 // processBlobTier checks and updates blob tier if necessary
@@ -344,6 +425,8 @@ func processBlobTier(account, containerName, blobPath string) (string, error) {
 	}
 
 	currentTier := blob.AccessTier(*props.AccessTier)
+	log.Printf("Blob %s/%s/%s current tier: %s", account, containerName, blobPath, currentTier)
+
 	if currentTier == blob.AccessTierArchive {
 		blockClient, err := blockblob.NewClient(blobClient.URL(), cred, nil)
 		if err != nil {
@@ -388,7 +471,6 @@ func uploadToOutputContainer(ctx context.Context, cred *azidentity.ManagedIdenti
 	}
 
 	// Create new filename with timestamp or processed marker
-	// For simplicity, we'll just add "_processed" suffix
 	newFilename := strings.TrimSuffix(originalFilename, ".xlsx") + "_processed.xlsx"
 
 	// Convert bytes.Buffer to ReadSeekCloser which implements io.ReadSeekCloser
