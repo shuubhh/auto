@@ -138,7 +138,7 @@ func handleProcess(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, "✅ Event processed")
 }
 
-// processExcelBlob downloads the blob, processes it, and uploads to output container
+// processExcelBlob downloads the blob, processes it, and uploads to output container in different storage account
 func processExcelBlob(blobURL string) error {
 	ctx := context.Background()
 	cred, err := azidentity.NewManagedIdentityCredential(nil)
@@ -146,7 +146,7 @@ func processExcelBlob(blobURL string) error {
 		return fmt.Errorf("failed to get MI credential: %w", err)
 	}
 
-	// Create block blob client
+	// Create block blob client for input blob
 	blockBlobClient, err := blockblob.NewClient(blobURL, cred, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create block blob client: %w", err)
@@ -171,16 +171,15 @@ func processExcelBlob(blobURL string) error {
 	}
 	defer f.Close()
 
-	// Get output container name from environment variable
+	// Get output storage account and container from environment variables
+	outputStorageAccount := os.Getenv("OUTPUT_STORAGE_ACCOUNT")
+	if outputStorageAccount == "" {
+		return fmt.Errorf("OUTPUT_STORAGE_ACCOUNT environment variable not set")
+	}
+
 	outputContainer := os.Getenv("OUTPUT_STORAGE_CONTAINER")
 	if outputContainer == "" {
 		return fmt.Errorf("OUTPUT_STORAGE_CONTAINER environment variable not set")
-	}
-
-	// Get storage account name from the input blob URL
-	storageAccount, err := extractStorageAccountFromURL(blobURL)
-	if err != nil {
-		return fmt.Errorf("failed to extract storage account from URL: %w", err)
 	}
 
 	// Process the Excel file
@@ -195,8 +194,8 @@ func processExcelBlob(blobURL string) error {
 		return fmt.Errorf("failed to write excel to buffer: %w", err)
 	}
 
-	// Upload processed file to output container
-	if err := uploadToOutputContainer(ctx, cred, storageAccount, outputContainer, blobURL, &excelBuffer); err != nil {
+	// Upload processed file to output storage account
+	if err := uploadToOutputContainer(ctx, cred, outputStorageAccount, outputContainer, blobURL, &excelBuffer); err != nil {
 		return fmt.Errorf("failed to upload to output container: %w", err)
 	}
 
@@ -274,7 +273,6 @@ func processExcelFile(f *excelize.File) (map[string]int, error) {
 		}
 
 		stats["processed"]++
-
 		account := m[1]
 		containerName := m[2]
 		blobPath := m[3]
@@ -363,12 +361,12 @@ func processBlobTier(account, containerName, blobPath string) (string, error) {
 	return fmt.Sprintf("Skipped: Already %s", string(currentTier)), nil
 }
 
-// uploadToOutputContainer uploads the processed file to the output container
+// uploadToOutputContainer uploads the processed file to the output container in the specified storage account
 func uploadToOutputContainer(ctx context.Context, cred *azidentity.ManagedIdentityCredential, storageAccount, outputContainer, originalBlobURL string, excelBuffer *bytes.Buffer) error {
 	serviceURL := fmt.Sprintf("https://%s.blob.core.windows.net/", storageAccount)
 	serviceClient, err := service.NewClient(serviceURL, cred, nil)
 	if err != nil {
-		return fmt.Errorf("failed to create service client: %w", err)
+		return fmt.Errorf("failed to create service client for output storage account: %w", err)
 	}
 
 	// Ensure output container exists
@@ -380,7 +378,7 @@ func uploadToOutputContainer(ctx context.Context, cred *azidentity.ManagedIdenti
 		if err != nil {
 			return fmt.Errorf("failed to create output container: %w", err)
 		}
-		log.Printf("Created output container: %s", outputContainer)
+		log.Printf("Created output container: %s in storage account: %s", outputContainer, storageAccount)
 	}
 
 	// Extract original filename from blob URL
@@ -397,9 +395,9 @@ func uploadToOutputContainer(ctx context.Context, cred *azidentity.ManagedIdenti
 	excelData := excelBuffer.Bytes()
 	reader := ReadSeekCloser{bytes.NewReader(excelData)}
 
-	// Upload to output container
+	// Upload to output container in the specified storage account
 	blobClient := containerClient.NewBlockBlobClient(newFilename)
-	contentType := http.DetectContentType(excelData)
+	contentType := "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 	
 	_, err = blobClient.Upload(ctx, reader, &blockblob.UploadOptions{
 		HTTPHeaders: &blob.HTTPHeaders{
@@ -407,10 +405,10 @@ func uploadToOutputContainer(ctx context.Context, cred *azidentity.ManagedIdenti
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("failed to upload processed file: %w", err)
+		return fmt.Errorf("failed to upload processed file to output storage account: %w", err)
 	}
 
-	log.Printf("✅ Processed file uploaded to: %s/%s", outputContainer, newFilename)
+	log.Printf("✅ Processed file uploaded to: %s/%s in storage account: %s", outputContainer, newFilename, storageAccount)
 	return nil
 }
 
