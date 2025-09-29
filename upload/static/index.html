@@ -1,36 +1,483 @@
+
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <title>Excel Upload</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Excel Processor - Azure Blob Tier Manager</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #2c3e50 0%, #3498db 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            font-weight: 300;
+        }
+
+        .header p {
+            font-size: 1.1rem;
+            opacity: 0.9;
+        }
+
+        .content {
+            padding: 40px;
+        }
+
+        .upload-section {
+            background: #f8f9fa;
+            border: 2px dashed #dee2e6;
+            border-radius: 10px;
+            padding: 40px;
+            text-align: center;
+            margin-bottom: 30px;
+            transition: all 0.3s ease;
+        }
+
+        .upload-section:hover {
+            border-color: #3498db;
+            background: #f1f8ff;
+        }
+
+        .upload-section.dragover {
+            border-color: #3498db;
+            background: #e3f2fd;
+            transform: scale(1.02);
+        }
+
+        .upload-icon {
+            font-size: 3rem;
+            color: #3498db;
+            margin-bottom: 15px;
+        }
+
+        .file-input {
+            display: none;
+        }
+
+        .file-label {
+            display: inline-block;
+            background: #3498db;
+            color: white;
+            padding: 12px 30px;
+            border-radius: 25px;
+            cursor: pointer;
+            font-size: 1rem;
+            transition: all 0.3s ease;
+            margin: 10px 0;
+        }
+
+        .file-label:hover {
+            background: #2980b9;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(52, 152, 219, 0.3);
+        }
+
+        .upload-btn {
+            background: #27ae60;
+            color: white;
+            border: none;
+            padding: 15px 40px;
+            border-radius: 25px;
+            cursor: pointer;
+            font-size: 1.1rem;
+            transition: all 0.3s ease;
+            margin-top: 20px;
+        }
+
+        .upload-btn:hover:not(:disabled) {
+            background: #219a52;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(39, 174, 96, 0.3);
+        }
+
+        .upload-btn:disabled {
+            background: #95a5a6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .file-info {
+            margin: 15px 0;
+            padding: 15px;
+            background: #e8f5e8;
+            border-radius: 8px;
+            border-left: 4px solid #27ae60;
+        }
+
+        .status-section {
+            margin-top: 30px;
+        }
+
+        .status-card {
+            background: white;
+            border: 1px solid #e1e8ed;
+            border-radius: 10px;
+            padding: 25px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+        }
+
+        .status-success {
+            border-left: 4px solid #27ae60;
+        }
+
+        .status-processing {
+            border-left: 4px solid #f39c12;
+        }
+
+        .status-error {
+            border-left: 4px solid #e74c3c;
+        }
+
+        .status-info {
+            border-left: 4px solid #3498db;
+        }
+
+        .processed-file-section {
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 25px;
+            margin-top: 30px;
+        }
+
+        .processed-file-card {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            border: 1px solid #e1e8ed;
+        }
+
+        .download-btn {
+            background: #9b59b6;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 25px;
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-block;
+            margin-top: 15px;
+            transition: all 0.3s ease;
+            font-size: 1rem;
+        }
+
+        .download-btn:hover {
+            background: #8e44ad;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(155, 89, 182, 0.3);
+        }
+
+        .refresh-btn {
+            background: #3498db;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 15px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            margin-left: 10px;
+        }
+
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #3498db;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 10px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .hidden {
+            display: none;
+        }
+
+        .file-name {
+            font-weight: 600;
+            color: #2c3e50;
+            font-size: 1.2rem;
+            margin-bottom: 8px;
+        }
+
+        .timestamp {
+            color: #7f8c8d;
+            font-size: 0.9rem;
+            margin-bottom: 15px;
+        }
+
+        @media (max-width: 768px) {
+            .content {
+                padding: 20px;
+            }
+
+            .header h1 {
+                font-size: 2rem;
+            }
+
+            .upload-section {
+                padding: 20px;
+            }
+        }
+    </style>
 </head>
 <body>
-  <h1>Upload Excel File</h1>
-  <input type="file" id="fileInput" />
-  <button onclick="uploadFile()">Upload</button>
-  <pre id="status"></pre>
- 
-  <script>
-    async function uploadFile() {
-      const fileInput = document.getElementById("fileInput");
-      if (!fileInput.files.length) {
-        alert("Please choose a file");
-        return;
-      }
-      const file = fileInput.files[0];
- 
-      const formData = new FormData();
-      formData.append("file", file);
- 
-      const res = await fetch("/upload", {
-        method: "POST",
-        body: formData
-      });
- 
-      const status = document.getElementById("status");
-      status.textContent = res.ok ? "✅ Upload successful!" : "❌ Upload failed!";
-    }
-  </script>
+    <div class="container">
+        <div class="header">
+            <h1>📊 Azure Blob Tier Manager</h1>
+            <p>Upload Excel files to process blob storage tiers</p>
+        </div>
+
+        <div class="content">
+            <!-- Upload Section -->
+            <div class="upload-section" id="uploadArea">
+                <div class="upload-icon">📤</div>
+                <h2>Upload Excel File</h2>
+                <p>Select an Excel file (.xlsx) containing Azure blob URLs to process</p>
+
+                <input type="file" id="fileInput" class="file-input" accept=".xlsx">
+                <label for="fileInput" class="file-label">📁 Choose Excel File</label>
+
+                <div id="fileInfo" class="file-info hidden"></div>
+
+                <button onclick="uploadFile()" class="upload-btn" id="uploadBtn">
+                    🚀 Process File
+                </button>
+            </div>
+
+            <!-- Upload Status -->
+            <div class="status-section">
+                <div id="uploadStatus" class="status-card hidden"></div>
+            </div>
+
+            <!-- Processed File Section -->
+            <div class="processed-file-section">
+                <h3>📋 Processed File</h3>
+                <div id="processedFileCard" class="processed-file-card">
+                    <div id="noFileMessage">
+                        <p>No processed files available yet. Upload an Excel file to get started.</p>
+                    </div>
+                    <div id="fileDetails" class="hidden">
+                        <div class="file-name" id="processedFileName"></div>
+                        <div class="timestamp">Processed: <span id="processedTime"></span></div>
+                        <a href="#" id="downloadLink" class="download-btn">
+                            📥 Download Processed File
+                        </a>
+                        <button onclick="checkForProcessedFile()" class="refresh-btn">
+                            🔄 Refresh
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentFileName = '';
+
+        // Drag and drop functionality
+        const uploadArea = document.getElementById('uploadArea');
+        const fileInput = document.getElementById('fileInput');
+        const fileInfo = document.getElementById('fileInfo');
+        const uploadBtn = document.getElementById('uploadBtn');
+
+        uploadArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadArea.classList.add('dragover');
+        });
+
+        uploadArea.addEventListener('dragleave', () => {
+            uploadArea.classList.remove('dragover');
+        });
+
+        uploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadArea.classList.remove('dragover');
+
+            const files = e.dataTransfer.files;
+            if (files.length > 0) {
+                fileInput.files = files;
+                handleFileSelection(files[0]);
+            }
+        });
+
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                handleFileSelection(e.target.files[0]);
+            }
+        });
+
+        function handleFileSelection(file) {
+            if (file && file.name.toLowerCase().endsWith('.xlsx')) {
+                currentFileName = file.name;
+                fileInfo.innerHTML = `
+                    <strong>Selected file:</strong> ${file.name}<br>
+                    <strong>Size:</strong> ${(file.size / 1024 / 1024).toFixed(2)} MB
+                `;
+                fileInfo.classList.remove('hidden');
+                uploadBtn.disabled = false;
+            } else {
+                alert('❌ Please select a valid Excel file (.xlsx)');
+                fileInput.value = '';
+            }
+        }
+
+        async function uploadFile() {
+            if (!fileInput.files.length) {
+                alert('Please select a file first');
+                return;
+            }
+
+            const file = fileInput.files[0];
+            const formData = new FormData();
+            formData.append("file", file);
+
+            const uploadStatus = document.getElementById('uploadStatus');
+            uploadStatus.innerHTML = `
+                <div class="status-processing">
+                    <div class="loading"></div> Uploading and processing your file... This may take 30-60 seconds.
+                </div>
+            `;
+            uploadStatus.classList.remove('hidden');
+            uploadBtn.disabled = true;
+            uploadBtn.innerHTML = '<div class="loading"></div> Processing...';
+
+            try {
+                const response = await fetch("/upload", {
+                    method: "POST",
+                    body: formData
+                });
+
+                const result = await response.json();
+
+                if (response.ok) {
+                    uploadStatus.innerHTML = `
+                        <div class="status-success">
+                            ✅ ${result.message}<br>
+                            <small>File processing started. Click "Refresh" in a minute to check for the processed file.</small>
+                        </div>
+                    `;
+
+                    // Clear file input
+                    fileInput.value = '';
+                    fileInfo.classList.add('hidden');
+                    currentFileName = '';
+
+                } else {
+                    uploadStatus.innerHTML = `
+                        <div class="status-error">
+                            ❌ ${result.error || 'Upload failed!'}
+                        </div>
+                    `;
+                }
+            } catch (error) {
+                uploadStatus.innerHTML = `
+                    <div class="status-error">
+                        ❌ Network error: ${error.message}
+                    </div>
+                `;
+            } finally {
+                uploadBtn.disabled = false;
+                uploadBtn.innerHTML = '🚀 Process File';
+            }
+        }
+
+        async function checkForProcessedFile() {
+            try {
+                console.log('🔍 Checking for processed file...');
+                const response = await fetch('/api/latest-processed');
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const data = await response.json();
+                console.log('📄 Backend response:', data);
+
+                updateFileDisplay(data);
+
+            } catch (error) {
+                console.error('❌ Error checking for processed file:', error);
+                const uploadStatus = document.getElementById('uploadStatus');
+                uploadStatus.innerHTML = `
+                    <div class="status-error">
+                        ❌ Error checking for processed file: ${error.message}
+                    </div>
+                `;
+                uploadStatus.classList.remove('hidden');
+            }
+        }
+
+        function updateFileDisplay(data) {
+            const noFileMessage = document.getElementById('noFileMessage');
+            const fileDetails = document.getElementById('fileDetails');
+            const processedFileName = document.getElementById('processedFileName');
+            const processedTime = document.getElementById('processedTime');
+            const downloadLink = document.getElementById('downloadLink');
+
+            console.log('🔄 Updating file display with data:', data);
+
+            if (data.available && data.file && data.file.fileName) {
+                noFileMessage.classList.add('hidden');
+                fileDetails.classList.remove('hidden');
+
+                const fileName = data.file.fileName;
+                processedFileName.textContent = fileName;
+                processedTime.textContent = new Date(data.file.processedAt).toLocaleString();
+
+                // Use backend proxy for download (no SAS token needed)
+                downloadLink.href = `/api/download/${encodeURIComponent(fileName)}`;
+                downloadLink.textContent = '📥 Download ' + fileName;
+
+                // Remove target="_blank" to trigger download instead of navigation
+                downloadLink.removeAttribute('target');
+
+                console.log('✅ Download button updated with proxy URL');
+            } else {
+                noFileMessage.classList.remove('hidden');
+                fileDetails.classList.add('hidden');
+                console.log('ℹ️ No processed files available');
+            }
+        }
+
+        // Initialize - check for existing processed file on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            console.log('🚀 Frontend initialized, checking for existing processed files...');
+            checkForProcessedFile();
+            uploadBtn.disabled = true;
+        });
+    </script>
 </body>
 </html>
- 
